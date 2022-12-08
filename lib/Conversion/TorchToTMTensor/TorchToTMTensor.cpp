@@ -231,6 +231,8 @@ public:
     Value values = adaptor.getValues();
     RankedTensorType inputType = input.getType().cast<RankedTensorType>();
     RankedTensorType valuesType = values.getType().cast<RankedTensorType>();
+    int64_t inputRank = inputType.getRank();
+    int64_t valuesRank = valuesType.getRank();
     auto resultType = typeConverter->convertType(op->getResult(0).getType())
                           .cast<RankedTensorType>();
 
@@ -275,14 +277,66 @@ public:
 
     // Creating a tm_tensor.scatter op with the following mapping:
     // 1.) Index tensor from the `indicesList` maps to the indices in scatter
-    // op. Index tensor is expanded from 1-d to 2-d, and its element type is set
-    // to i32 as required for the scatter op.
+    // op. Index tensor is expanded from 1-d to 2-d, and if it is already 2-d
+    // then first it is collapsed to a 1-d tensor and then expanded. And its
+    // element type is set to i32 as required for the scatter op.
     // 2.) `values` is mapped to `updates` in scatter op.
     // 3.) `input` is mapped to `original` in scatter op.
     std::optional<unsigned> indexTensorRank = getTensorRank(indexTensor);
-    if (!indexTensorRank || *indexTensorRank != 1)
+    if (!indexTensorRank)
       return rewriter.notifyMatchFailure(
-          op, "unimplemented: index tensor with rank != 1 is not supported");
+          op, "expected index tensor to have a rank");
+
+    if (*indexTensorRank == 2) {
+      auto indexTensorType = indexTensor.getType().cast<BaseTensorType>();
+      SmallVector<int64_t> indexTensorShape(indexTensorType.getSizes());
+      if (indexTensorShape[0] == 1) {
+        ValueTensorType collapsedIndexTensorType = ValueTensorType::get(
+            context, llvm::makeArrayRef({indexTensorShape[1]}),
+            indexTensorType.getDtype());
+        Value torchCstZero = rewriter.create<Torch::ConstantIntOp>(
+            loc, rewriter.getI64IntegerAttr(0));
+        Value torchCstOne = rewriter.create<Torch::ConstantIntOp>(
+            loc, rewriter.getI64IntegerAttr(1));
+        indexTensor = rewriter.create<AtenFlattenUsingIntsOp>(
+            loc, collapsedIndexTensorType, indexTensor, torchCstZero,
+            torchCstOne);
+      } else {
+        return rewriter.notifyMatchFailure(
+            op, "unimplemented: index tensor with rank 2 is supported only "
+                "when its first dimension is equal to 1");
+      }
+    } else if (*indexTensorRank > 2) {
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: index tensor with rank > 2 is not supported");
+    }
+
+    if (inputRank != valuesRank) {
+      auto valueTensorType = op.getValues().getType().cast<BaseTensorType>();
+      SmallVector<int64_t> valueTensorShape(valueTensorType.getSizes());
+      if (valuesRank == (inputRank + 1) && valueTensorShape[0] == 1) {
+        SmallVector<int64_t> collapsedValueTensorSizes(
+            valueTensorShape.begin() + 1, valueTensorShape.end());
+        auto collapsedValueTensorType = ValueTensorType::get(
+            context, llvm::makeArrayRef(collapsedValueTensorSizes),
+            valueTensorType.getDtype());
+        Value torchCstZero = rewriter.create<Torch::ConstantIntOp>(
+            loc, rewriter.getI64IntegerAttr(0));
+        auto collapsedValueTensor =
+            rewriter
+                .create<AtenSqueezeDimOp>(loc, collapsedValueTensorType,
+                                          op.getValues(), torchCstZero)
+                ->getResult(0);
+        values = typeConverter->materializeTargetConversion(
+            rewriter, loc,
+            typeConverter->convertType(collapsedValueTensor.getType()),
+            collapsedValueTensor);
+      } else {
+        return rewriter.notifyMatchFailure(
+            op, "unimplemented: value tensor with rank != input rank is not "
+                "supported");
+      }
+    }
     auto indexTensorType = indexTensor.getType().cast<BaseTensorType>();
     int64_t indexTensorSize = indexTensorType.getSizes()[0];
     SmallVector<int64_t> expandedIndexTensorSizes{indexTensorSize, 1};
