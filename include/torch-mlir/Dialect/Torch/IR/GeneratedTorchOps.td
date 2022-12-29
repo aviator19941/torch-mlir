@@ -6537,6 +6537,7 @@ def Torch_AtenNewEmptyStridedOp : Torch_Op<"aten.new_empty_strided", [
       printDefaultTorchOp(printer, *this, 7, 1);
     }
   }];
+  let hasCanonicalizer = 1;
 }
 
 def Torch_AtenZerosLikeOp : Torch_Op<"aten.zeros_like", [

@@ -1791,3 +1791,25 @@ func.func @torch.aten.slice.tensor$fold_full_domain_slice(%arg0: !torch.vtensor<
   %0 = torch.aten.slice.Tensor %arg0, %int0, %int0, %int-1, %int1 : !torch.vtensor<[4], f32>, !torch.int, !torch.int, !torch.int, !torch.int -> !torch.vtensor<[4], f32>
   return %0 : !torch.vtensor<[4],f32>
 }
+
+// CHECK-LABEL:@torch.aten.new_empty_strided(
+// CHECK-SAME:      %[[ARG0:.+]]: !torch.tensor
+// CHECK:      %[[NONE:.*]] = torch.constant.none
+// CHECK:      %[[INT2:.*]] = torch.constant.int 2
+// CHECK:      %[[INT3:.*]] = torch.constant.int 3
+// CHECK:      %[[INT4:.*]] = torch.constant.int 4
+// CHECK:      %[[SIZE:.*]] = torch.prim.ListConstruct %[[INT2]], %[[INT3]], %[[INT4]] : (!torch.int, !torch.int, !torch.int) -> !torch.list<int>
+// CHECK:      %[[RESULT:.*]] = torch.aten.new_empty %[[ARG0]], %[[SIZE]], %[[NONE]], %[[NONE]], %[[NONE]], %[[NONE]] : !torch.tensor, !torch.list<int>, !torch.none, !torch.none, !torch.none, !torch.none -> !torch.tensor
+// CHECK:      return %[[RESULT]] : !torch.tensor
+func.func @torch.aten.new_empty_strided(%arg0: !torch.tensor) -> !torch.tensor {
+  %none = torch.constant.none
+  %int2 = torch.constant.int 2
+  %int3 = torch.constant.int 3
+  %int4 = torch.constant.int 4
+  %int12 = torch.constant.int 12
+  %int1 = torch.constant.int 1
+  %0 = torch.prim.ListConstruct %int2, %int3, %int4 : (!torch.int, !torch.int, !torch.int) -> !torch.list<int>
+  %1 = torch.prim.ListConstruct %int12, %int4, %int1 : (!torch.int, !torch.int, !torch.int) -> !torch.list<int>
+  %2 = torch.aten.new_empty_strided %arg0, %0, %1, %none, %none, %none, %none : !torch.tensor, !torch.list<int>, !torch.list<int>, !torch.none, !torch.none, !torch.none, !torch.none -> !torch.tensor
+  return %2 : !torch.tensor
+}
