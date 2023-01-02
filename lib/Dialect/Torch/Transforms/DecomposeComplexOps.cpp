@@ -171,6 +171,35 @@ static Value createSoftmaxBackwardCommonKernel(PatternRewriter &rewriter,
   return sub;
 }
 
+// This algorithm is adopted from:
+// https://github.com/pytorch/pytorch/blob/c47bdd7522c7146c091c95ff5b4ce354d7a8870c/aten/src/ATen/native/TensorShape.cpp#L3660
+static SmallVector<int64_t>
+computeDimsOrderForMoveDim(ArrayRef<int64_t> srcDimInt,
+                           ArrayRef<int64_t> dstDimInt, unsigned inputRank) {
+  SmallVector<int64_t> srcDims, dstDims, dimsOrder;
+  for (unsigned i = 0; i < inputRank; i++) {
+    srcDims.push_back(i);
+    dstDims.push_back(i);
+    dimsOrder.push_back(-1);
+  }
+  for (unsigned i = 0; i < srcDimInt.size(); i++) {
+    dimsOrder[dstDimInt[i]] = srcDimInt[i];
+    srcDims[srcDimInt[i]] = -1;
+    dstDims[dstDimInt[i]] = -1;
+  }
+  SmallVector<int64_t> sourceDims, destinationDims;
+  for (unsigned i = 0; i < inputRank; i++) {
+    if (srcDims[i] != -1)
+      sourceDims.push_back(srcDims[i]);
+    if (dstDims[i] != -1)
+      destinationDims.push_back(dstDims[i]);
+  }
+  unsigned restDim = inputRank - srcDimInt.size();
+  for (unsigned i = 0; i < restDim; i++)
+    dimsOrder[destinationDims[i]] = sourceDims[i];
+  return dimsOrder;
+}
+
 namespace {
 /// We decompose aten.amax into a set of aten.max.dim op(s) depending on the
 /// number of dimensions across which the max needs to be computed.
@@ -3592,43 +3621,54 @@ public:
 } // namespace
 
 namespace {
-class DecomposeAtenNewEmptyStridedOp
-    : public OpRewritePattern<AtenNewEmptyStridedOp> {
+class DecomposeAtenMovedimIntOp : public OpRewritePattern<AtenMovedimIntOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
-  LogicalResult matchAndRewrite(AtenNewEmptyStridedOp op,
+  LogicalResult matchAndRewrite(AtenMovedimIntOp op,
                                 PatternRewriter &rewriter) const override {
-    SmallVector<int64_t> sizeListInts, strideListInts;
-    if (!matchPattern(op.getSize(), m_TorchListOfConstantInts(sizeListInts)))
+    Location loc = op.getLoc();
+    Value input = op.getSelf();
+    std::optional<unsigned> maybeInputRank = getTensorRank(input);
+    if (!maybeInputRank) {
       return rewriter.notifyMatchFailure(
-          op, "all size list elements must be constant ints");
-    if (!matchPattern(op.getStride(),
-                      m_TorchListOfConstantInts(strideListInts)))
-      return rewriter.notifyMatchFailure(
-          op, "all stride list elements must be constant ints");
-
-    // We only support the cases with default stride values.
-    // For ex: aten.new_empty_strided(self, size=[2, 3, 4], stride=[12, 4, 1])
-    // Here the stride[0] == size[1] * size[2], stride[1] == size[2], and
-    // stride[2] == 1.
-    bool isDefaultStride = true;
-    for (unsigned i = 0; i < strideListInts.size(); i++) {
-      int64_t defaultStride = 1;
-      for (unsigned j = i + 1; j < sizeListInts.size(); j++)
-        defaultStride *= sizeListInts[j];
-      if (defaultStride != strideListInts[i]) {
-        isDefaultStride = false;
-        break;
-      }
+          op, "expected input tensor to have a rank");
+    }
+    unsigned inputRank = *maybeInputRank;
+    if (inputRank <= 1) {
+      rewriter.replaceOp(op, input);
+      return success();
     }
 
-    if (!isDefaultStride)
-      return rewriter.notifyMatchFailure(
-          op, "only default strides supported for new_empty_strided op");
+    int64_t srcDimInt, dstDimInt;
+    if (matchPattern(op.getSource(), m_TorchConstantInt(&srcDimInt))) {
+      srcDimInt = toPositiveDim(srcDimInt, inputRank);
+      if (!isValidDim(srcDimInt, inputRank))
+        return rewriter.notifyMatchFailure(op, "source is not a valid dim");
+    } else {
+      return rewriter.notifyMatchFailure(op, "source is not a constant int");
+    }
+    if (matchPattern(op.getDestination(), m_TorchConstantInt(&dstDimInt))) {
+      dstDimInt = toPositiveDim(dstDimInt, inputRank);
+      if (!isValidDim(dstDimInt, inputRank))
+        return rewriter.notifyMatchFailure(op,
+                                           "destination is not a valid dim");
+    } else {
+      return rewriter.notifyMatchFailure(op,
+                                         "destination is not a constant int");
+    }
 
-    rewriter.replaceOpWithNewOp<AtenNewEmptyOp>(
-        op, op.getType(), op.getSelf(), op.getSize(), op.getDtype(),
-        op.getLayout(), op.getDevice(), op.getPinMemory());
+    SmallVector<int64_t> dimsOrder =
+        computeDimsOrderForMoveDim(llvm::makeArrayRef({srcDimInt}),
+                                   llvm::makeArrayRef({dstDimInt}), inputRank);
+    SmallVector<Value> cstDimsOrder;
+    for (int64_t dim : dimsOrder)
+      cstDimsOrder.push_back(rewriter.create<Torch::ConstantIntOp>(
+          loc, rewriter.getI64IntegerAttr(dim)));
+    Value permuteDimsOrder = rewriter.create<PrimListConstructOp>(
+        loc, Torch::ListType::get(Torch::IntType::get(op->getContext())),
+        cstDimsOrder);
+    rewriter.replaceOpWithNewOp<AtenPermuteOp>(op, op.getType(), input,
+                                               permuteDimsOrder);
     return success();
   }
 };
@@ -3787,7 +3827,11 @@ public:
     addPatternIfTargetOpIsIllegal<DecomposeAtenVarMeanOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenLeakyReluOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenLeakyReluBackwardOp>(patterns);
+<<<<<<< HEAD
     addPatternIfTargetOpIsIllegal<DecomposeAtenNewEmptyStridedOp>(patterns);
+=======
+    addPatternIfTargetOpIsIllegal<DecomposeAtenMovedimIntOp>(patterns);
+>>>>>>> 7447a86c ([MLIR][TORCH] Add e2e support aten.movedim.int op)
 
     GreedyRewriteConfig config;
     config.useTopDownTraversal = true;
