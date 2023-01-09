@@ -1498,9 +1498,9 @@ public:
     if (!matchPattern(op.getOutputMask(), m_TorchListOfConstantBools(outMask)))
       return rewriter.notifyMatchFailure(
           op, "output mask must be a list of constant bools");
-    if (!llvm::all_of(outMask, [](bool mask) { return mask; }))
-      return rewriter.notifyMatchFailure(
-          op, "unimplemented: only true values for output_mask supported.");
+    // if (!llvm::all_of(outMask, [](bool mask) { return mask; }))
+    //   return rewriter.notifyMatchFailure(
+    //       op, "unimplemented: only true values for output_mask supported.");
 
     bool transposed;
     if (!matchPattern(op.getTransposed(), m_TorchConstantBool(&transposed)))
