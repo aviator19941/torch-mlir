@@ -818,3 +818,32 @@ class IndexPutHackedTwin3DIntAccumulateModule(torch.nn.Module):
 def IndexPutHackedTwin3DIntAccumulateModule_basic(module, tu: TestUtils):
     module.forward(tu.randint(10, 8, 6, high=1000), tu.randint(5, high=4),
                    tu.randint(5, 8, 6, high=1000))
+
+
+# ==============================================================================
+
+
+class IndexPutImpl2DIndexSDModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([1,640,32,32], torch.float32, True),
+        ([64, 1], torch.int64, True),
+        ([64], torch.int64, True),
+        ([1,640,64,64], torch.float32, True),
+    ])
+    def forward(self, input, index1, index2, value):
+        return torch.ops.aten._index_put_impl_(input, (None, None, index1, index2),
+                                               value,
+                                               accumulate=True,
+                                               unsafe=False)
+
+
+@register_test_case(
+    module_factory=lambda: IndexPutImpl2DIndexSDModule())
+def IndexPutImpl2DIndexSDModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(1,640,32,32), tu.randint(64, 1, high=3), tu.randint(64, high=3), tu.rand(1,640,64,64))

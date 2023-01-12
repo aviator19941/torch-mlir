@@ -49,6 +49,10 @@ def _get_decomposition_table():
         # (the upstream decomposition we use here does), even though we have
         # support for aten.native_batch_norm_backward.
         aten._native_batch_norm_legit_functional,
+        aten.split.Tensor,
+        aten.native_group_norm,
+        aten.split_with_sizes,
+        aten.mse_loss_backward,
     ])
 
 

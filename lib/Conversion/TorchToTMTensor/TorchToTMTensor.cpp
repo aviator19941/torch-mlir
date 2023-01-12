@@ -265,67 +265,127 @@ public:
           op, "Indices list size should not be greater than the input rank.");
 
     // TODO: Add support for cases with indices list size not equal to 1.
-    if (indicesList.size() != 1)
-      return rewriter.notifyMatchFailure(
-          op, "Unimplemented: Indices list size != 1");
-    Value indexTensor = indicesList[0];
+    Value scatterOp;
+    printf("INPUT TYPE RANK: %ld\n", inputType.getRank());
+    printf("INDICES LIST SIZE: %ld\n", (int64_t)indicesList.size());
+    for (int64_t i = 0; i < (int64_t)indicesList.size(); i++) {
+      printf("TORCH TO TM TENSOR: %ld\n", i);
+      Value indexTensor = indicesList[i];
+      indexTensor.dump();
 
-    if (indexTensor.getType().isa<Torch::NoneType>())
-      return rewriter.notifyMatchFailure(op, "Index tensor must not be None.");
+      if (indexTensor.getType().isa<Torch::NoneType>())
+        return rewriter.notifyMatchFailure(op, "Index tensor must not be None.");
 
-    // Creating a tm_tensor.scatter op with the following mapping:
-    // 1.) Index tensor from the `indicesList` maps to the indices in scatter
-    // op. Index tensor is expanded from 1-d to 2-d, and its element type is set
-    // to i32 as required for the scatter op.
-    // 2.) `values` is mapped to `updates` in scatter op.
-    // 3.) `input` is mapped to `original` in scatter op.
-    std::optional<unsigned> indexTensorRank = getTensorRank(indexTensor);
-    if (!indexTensorRank || *indexTensorRank != 1)
-      return rewriter.notifyMatchFailure(
-          op, "unimplemented: index tensor with rank != 1 is not supported");
-    auto indexTensorType = indexTensor.getType().cast<BaseTensorType>();
-    int64_t indexTensorSize = indexTensorType.getSizes()[0];
-    SmallVector<int64_t> expandedIndexTensorSizes{indexTensorSize, 1};
-    ValueTensorType expandedIndexTensorType = ValueTensorType::get(
-        context, llvm::makeArrayRef(expandedIndexTensorSizes),
-        indexTensorType.getDtype());
-    Value torchCstOne = rewriter.create<Torch::ConstantIntOp>(
-        loc, rewriter.getI64IntegerAttr(1));
-    Value expandedIndexTensor = rewriter.create<AtenUnsqueezeOp>(
-        loc, expandedIndexTensorType, indexTensor, torchCstOne);
+      // Creating a tm_tensor.scatter op with the following mapping:
+      // 1.) Index tensor from the `indicesList` maps to the indices in scatter
+      // op. Index tensor is expanded from 1-d to 2-d, and if it is already 2-d
+      // then first it is collapsed to a 1-d tensor and then expanded. And its
+      // element type is set to i32 as required for the scatter op.
+      // 2.) `values` is mapped to `updates` in scatter op.
+      // 3.) `input` is mapped to `original` in scatter op.
+      std::optional<unsigned> indexTensorRank = getTensorRank(indexTensor);
+      if (!indexTensorRank)
+        return rewriter.notifyMatchFailure(
+            op, "expected index tensor to have a rank");
+      printf("INDEX TENSOR RANK: %d\n", *indexTensorRank);
+      if (*indexTensorRank == 2) {
+        printf("TORCH TO TM TENSOR 2: %ld\n", i);
+        auto indexTensorType = indexTensor.getType().cast<BaseTensorType>();
+        SmallVector<int64_t> indexTensorShape(indexTensorType.getSizes());
+        if (indexTensorShape[0] == 1) {
+          ValueTensorType collapsedIndexTensorType = ValueTensorType::get(
+              context, llvm::makeArrayRef({indexTensorShape[1]}),
+              indexTensorType.getDtype());
+          Value torchCstZero = rewriter.create<Torch::ConstantIntOp>(
+              loc, rewriter.getI64IntegerAttr(0));
+          Value torchCstOne = rewriter.create<Torch::ConstantIntOp>(
+              loc, rewriter.getI64IntegerAttr(1));
+          indexTensor = rewriter.create<AtenFlattenUsingIntsOp>(
+              loc, collapsedIndexTensorType, indexTensor, torchCstZero,
+              torchCstOne);
+          indexTensor.dump();
+        } else {
+          printf("FAIL HERE\n");
+          return rewriter.notifyMatchFailure(
+              op, "unimplemented: index tensor with rank 2 is supported only "
+                  "when its first dimension is equal to 1");
+        }
+      } else if (*indexTensorRank > 2) {
+        return rewriter.notifyMatchFailure(
+            op, "unimplemented: index tensor with rank > 2 is not supported");
+      }
 
-    // `TMTensor::ScatterOp` expects indices of element type i32.
-    Value indices = convertTensorToDtype(
-        rewriter, loc, expandedIndexTensor,
-        mlir::IntegerType::get(context, 32, mlir::IntegerType::Signed));
-    indices = typeConverter->materializeTargetConversion(
-        rewriter, loc, typeConverter->convertType(indices.getType()), indices);
+      if (inputRank != valuesRank) {
+        auto valueTensorType = op.getValues().getType().cast<BaseTensorType>();
+        SmallVector<int64_t> valueTensorShape(valueTensorType.getSizes());
+        if (valuesRank == (inputRank + 1) && valueTensorShape[0] == 1) {
+          SmallVector<int64_t> collapsedValueTensorSizes(
+              valueTensorShape.begin() + 1, valueTensorShape.end());
+          auto collapsedValueTensorType = ValueTensorType::get(
+              context, llvm::makeArrayRef(collapsedValueTensorSizes),
+              valueTensorType.getDtype());
+          Value torchCstZero = rewriter.create<Torch::ConstantIntOp>(
+              loc, rewriter.getI64IntegerAttr(0));
+          torchCstZero.dump();
+          auto collapsedValueTensor =
+              rewriter
+                  .create<AtenSqueezeDimOp>(loc, collapsedValueTensorType,
+                                            op.getValues(), torchCstZero)
+                  ->getResult(0);
+          values = typeConverter->materializeTargetConversion(
+              rewriter, loc,
+              typeConverter->convertType(collapsedValueTensor.getType()),
+              collapsedValueTensor);
+        } else {
+          return rewriter.notifyMatchFailure(
+              op, "unimplemented: value tensor with rank != input rank is not "
+                  "supported");
+        }
+      }
 
-    bool invalidInputTypeFound = false;
-    Value scatterOp = createTMTensorScatterOp(
-        rewriter, loc, values, indices, input, /*uniqueIndices=*/false,
-        [&](OpBuilder &b, Location loc, Value valuesElement,
-            Value inputElement) {
-          Value yieldValue = valuesElement;
-          if (accumulate) {
-            if (inputElement.getType().isa<mlir::IntegerType>()) {
-              yieldValue =
-                  b.create<arith::AddIOp>(loc, inputElement, valuesElement);
-            } else if (inputElement.getType().isa<mlir::FloatType>()) {
-              yieldValue =
-                  b.create<arith::AddFOp>(loc, inputElement, valuesElement);
-            } else {
-              invalidInputTypeFound = true;
-              return;
+      auto indexTensorType = indexTensor.getType().cast<BaseTensorType>();
+      int64_t indexTensorSize = indexTensorType.getSizes()[0];
+      SmallVector<int64_t> expandedIndexTensorSizes{indexTensorSize, 1};
+      ValueTensorType expandedIndexTensorType = ValueTensorType::get(
+          context, llvm::makeArrayRef(expandedIndexTensorSizes),
+          indexTensorType.getDtype());
+      Value torchCstOne = rewriter.create<Torch::ConstantIntOp>(
+          loc, rewriter.getI64IntegerAttr(1));
+      Value expandedIndexTensor = rewriter.create<AtenUnsqueezeOp>(
+          loc, expandedIndexTensorType, indexTensor, torchCstOne);
+      // `TMTensor::ScatterOp` expects indices of element type i32.
+      Value indices = convertTensorToDtype(
+          rewriter, loc, expandedIndexTensor,
+          mlir::IntegerType::get(context, 32, mlir::IntegerType::Signed));
+      indices = typeConverter->materializeTargetConversion(
+          rewriter, loc, typeConverter->convertType(indices.getType()), indices);
+
+      bool invalidInputTypeFound = false;
+      scatterOp = createTMTensorScatterOp(
+          rewriter, loc, values, indices, input, false,
+          [&](OpBuilder &b, Location loc, Value valuesElement,
+              Value inputElement) {
+            Value yieldValue = valuesElement;
+            if (accumulate) {
+              if (inputElement.getType().isa<mlir::IntegerType>()) {
+                yieldValue =
+                    b.create<arith::AddIOp>(loc, inputElement, valuesElement);
+              } else if (inputElement.getType().isa<mlir::FloatType>()) {
+                yieldValue =
+                    b.create<arith::AddFOp>(loc, inputElement, valuesElement);
+              } else {
+                invalidInputTypeFound = true;
+                return;
+              }
             }
-          }
-          b.create<TMTensor::YieldOp>(loc, yieldValue);
-        });
+            b.create<TMTensor::YieldOp>(loc, yieldValue);
+          });
 
-    if (invalidInputTypeFound) {
-      return rewriter.notifyMatchFailure(
-          op,
-          "unimplemented: input tensor must be of integer type or float type");
+      if (invalidInputTypeFound) {
+        return rewriter.notifyMatchFailure(
+            op,
+            "unimplemented: input tensor must be of integer type or float type");
+      }
     }
 
     rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, scatterOp);
