@@ -802,5 +802,4 @@ LTC_XFAIL_SET = {
     "VarMeanUnbiasedModule_basic",
     "RandnLikeModule_basic",
     "RandnLikeDtypeModule_basic",
-    "NewEmptyStridedModuleDefaultDtype_basic",
 }

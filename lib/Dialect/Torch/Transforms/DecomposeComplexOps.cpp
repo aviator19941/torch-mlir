@@ -3785,20 +3785,6 @@ public:
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(AtenRandnLikeOp op,
                                 PatternRewriter &rewriter) const override {
-    // Only `none`, `contiguous` and `preserve` memory_format is supported.
-    if (!op.getMemoryFormat().getType().isa<Torch::NoneType>()) {
-      int64_t memoryFormat;
-      if (!matchPattern(op.getMemoryFormat(),
-                        m_TorchConstantInt(&memoryFormat)))
-        return rewriter.notifyMatchFailure(
-            op, "unimplemented: the memory format should be specified in "
-                "an integer constant");
-      if (memoryFormat != torch_upstream::MemoryFormat::Contiguous &&
-          memoryFormat != torch_upstream::MemoryFormat::Preserve)
-        return rewriter.notifyMatchFailure(
-            op, "unimplemented: only none, contiguous and preserve "
-                "memory_format is supported");
-    }
     Value none = rewriter.create<Torch::ConstantNoneOp>(op.getLoc());
     auto sizeListType =
         Torch::ListType::get(Torch::IntType::get(op.getContext()));
