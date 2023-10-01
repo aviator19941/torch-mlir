@@ -190,7 +190,7 @@ public:
           AsmResourceBlob *blob = elements.getRawHandle().getBlob();
           assert(blob && "Expecting dense resource with a valid blob");
           rewriter.replaceOpWithNewOp<arith::ConstantOp>(
-              op, DenseElementsAttr::get(shapedType, blob->getData()));
+              op, DenseResourceElementsAttr::get(shapedType, elements.getRawHandle()));
           return success();
         }
       }
